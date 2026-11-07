@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>תגובות YouTube - כל הערוץ</title>
+<style>
+:root{font-family:Arial,sans-serif;color:#202124;background:#f6f7f9}
+*{box-sizing:border-box}body{margin:0;padding:24px}
+main{max-width:1100px;margin:auto}
+h1{font-size:26px;margin:0 0 8px}
+p{line-height:1.55;color:#5f6368}
+.panel{background:white;border:1px solid #e1e4e8;border-radius:14px;padding:18px;margin:16px 0}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+input,button,select{font:inherit;border:1px solid #c9cdd2;border-radius:9px;padding:11px 12px}
+input{flex:1;min-width:240px}
+button{background:#1769d2;color:white;border:0;cursor:pointer}
+button.secondary{background:#eef2f7;color:#202124;border:1px solid #d8dde5}
+button:disabled{opacity:.5;cursor:not-allowed}
+#status{white-space:pre-wrap;background:#f3f6fa;border-radius:9px;padding:12px;margin-top:12px;color:#344054}
+#results{display:grid;gap:10px}
+.comment{background:white;border:1px solid #e1e4e8;border-radius:12px;padding:14px}
+.meta{font-size:13px;color:#667085;margin-bottom:8px}
+.body{white-space:pre-wrap;line-height:1.5;overflow-wrap:anywhere}
+.video{font-size:13px;color:#1769d2;margin-top:8px}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+.small{font-size:13px;color:#667085}
+.hidden{display:none}
+</style>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+<main>
+  <h1>תגובות מכל הסרטונים בערוץ</h1>
+  <p>מציג תגובות ציבוריות מכל הסרטונים בערוץ שלך, ברשימה אחת. החיפוש והמיון מתבצעים בדפדפן.</p>
+
+  <section class="panel">
+    <h3>חיבור חד-פעמי</h3>
+    <p class="small">נדרש Google OAuth Client ID (לא API Key ולא Client Secret). מזינים אותו פעם אחת כאן; הוא נשמר רק בדפדפן הזה.</p>
+    <div class="row">
+      <input id="clientId" placeholder="Google OAuth Client ID">
+      <button id="saveClient">שמירת Client ID</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="login">התחברות לחשבון Google</button>
+      <button id="logout" class="secondary" disabled>ניתוק</button>
+      <button id="load" class="secondary" disabled>טעינת תגובות</button>
+    </div>
+    <div id="status">ממתין להגדרה ולהתחברות.</div>
+  </section>
+
+  <section class="panel hidden" id="dataPanel">
+    <div class="row">
+      <strong id="count">0 תגובות</strong>
+      <span class="small" id="videoCount"></span>
+    </div>
+    <div class="toolbar">
+      <input id="search" placeholder="חיפוש בתוכן, בשם המגיב או בשם הסרטון">
+      <select id="sort">
+        <option value="new">החדשות ביותר קודם</option>
+        <option value="old">הישנות ביותר קודם</option>
+        <option value="likes">הכי הרבה לייקים</option>
+      </select>
+      <button id="export" class="secondary">ייצוא CSV</button>
+    </div>
+    <div id="results"></div>
+  </section>
+</main>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const API = 'https://www.googleapis.com/youtube/v3/';
+  const SCOPE = 'https://www.googleapis.com/auth/youtube.readonly';
+  let tokenClient = null, accessToken = null, allComments = [], videosSeen = 0;
+
+  $('clientId').value = localStorage.getItem('yt_comments_client_id') || '';
+  $('saveClient').onclick = () => {
+    const id = $('clientId').value.trim();
+    if (!id || !id.endsWith('.apps.googleusercontent.com')) {
+      setStatus('Client ID לא תקין. הוא אמור להסתיים ב-.apps.googleusercontent.com');
+      return;
+    }
+    localStorage.setItem('yt_comments_client_id', id);
+    setStatus('נשמר בדפדפן. עכשיו אפשר להתחבר.');
+    initGoogle();
+  };
+
+  function setStatus(s){ $('status').textContent = s; }
+  function initGoogle(){
+    if (!window.google?.accounts?.oauth2) return setTimeout(initGoogle,300);
+    const id = localStorage.getItem('yt_comments_client_id');
+    if (!id) return;
+    tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id:id, scope:SCOPE,
+      callback: async response => {
+        if (response.error) return setStatus('שגיאת התחברות: '+response.error);
+        accessToken = response.access_token;
+        $('load').disabled = false;
+        $('logout').disabled = false;
+        setStatus('מחובר. לחץ על "טעינת תגובות".');
+      }
+    });
+  }
+
+  $('login').onclick = () => {
+    if (!localStorage.getItem('yt_comments_client_id')) {
+      setStatus('קודם צריך להזין ולשמור Google OAuth Client ID.');
+      return;
+    }
+    if (!tokenClient) initGoogle();
+    setTimeout(() => tokenClient?.requestAccessToken({prompt:'consent'}),200);
+  };
+  $('logout').onclick = () => {
+    if (accessToken && window.google?.accounts?.oauth2) google.accounts.oauth2.revoke(accessToken,()=>{});
+    accessToken=null; allComments=[];
+    $('load').disabled=true; $('logout').disabled=true; $('dataPanel').classList.add('hidden');
+    setStatus('נותקת מהחשבון.');
+  };
+  $('load').onclick = loadAll;
+
+  async function api(path, params={}) {
+    const u = new URL(API+path);
+    Object.entries(params).forEach(([k,v])=>u.searchParams.set(k,v));
+    const r = await fetch(u,{headers:{Authorization:'Bearer '+accessToken}});
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error?.message || ('HTTP '+r.status));
+    return data;
+  }
+  async function pages(path, params, key) {
+    let out=[], pageToken='';
+    do {
+      const d=await api(path,{...params,...(pageToken?{pageToken}:{})});
+      out.push(...(d[key]||[])); pageToken=d.nextPageToken||'';
+    } while(pageToken);
+    return out;
+  }
+  async function loadAll(){
+    $('load').disabled=true; allComments=[]; videosSeen=0;
+    $('dataPanel').classList.remove('hidden'); render();
+    try {
+      setStatus('מאתר את הערוץ...');
+      const ch=await api('channels',{part:'contentDetails',mine:'true'});
+      const channel=ch.items?.[0];
+      if(!channel) throw new Error('לא נמצא ערוץ בחשבון Google הזה.');
+      const uploads=channel.contentDetails.relatedPlaylists.uploads;
+      setStatus('טוען את רשימת הסרטונים...');
+      const items=await pages('playlistItems',{part:'snippet,contentDetails',playlistId:uploads,maxResults:50},'items');
+      const videoIds=[...new Set(items.map(x=>x.contentDetails?.videoId).filter(Boolean))];
+      videosSeen=videoIds.length;
+      setStatus(`נמצאו ${videosSeen} סרטונים. טוען תגובות...`);
+      for(let i=0;i<videoIds.length;i++){
+        const id=videoIds[i];
+        try {
+          const threads=await pages('commentThreads',{part:'snippet',videoId:id,maxResults:100,order:'time'},'items');
+          for(const t of threads){
+            const c=t.snippet?.topLevelComment?.snippet;
+            if(!c) continue;
+            allComments.push({
+              author:c.authorDisplayName||'',
+              text:c.textDisplay||c.textOriginal||'',
+              date:c.publishedAt||'',
+              likes:c.likeCount||0,
+              videoId:id,
+              videoTitle:t.snippet?.videoId||id,
+              replyCount:t.snippet?.totalReplyCount||0
+            });
+          }
+        } catch(e) {
+          // Some videos have comments disabled or unavailable; continue with the rest.
+        }
+        if((i+1)%5===0 || i===videoIds.length-1){
+          setStatus(`נטענו תגובות מ-${i+1} מתוך ${videoIds.length} סרטונים...`);
+        }
+      }
+      // Resolve video titles from the upload playlist metadata.
+      const titleById=new Map(items.map(x=>[x.contentDetails?.videoId,x.snippet?.title||'']));
+      allComments.forEach(c=>c.videoTitle=titleById.get(c.videoId)||c.videoId);
+      setStatus(`הסתיימה הטעינה: ${allComments.length} תגובות מ-${videosSeen} סרטונים.`);
+      render();
+    } catch(e) {
+      setStatus('הטעינה נכשלה: '+e.message+'\nבדוק שה-YouTube Data API v3 מופעל בפרויקט Google Cloud ושחשבון Google מחובר לערוץ הנכון.');
+    } finally { $('load').disabled=false; }
+  }
+  function render(){
+    const q=$('search').value.trim().toLowerCase();
+    const sort=$('sort').value;
+    let arr=allComments.filter(c=>(c.text+' '+c.author+' '+c.videoTitle).toLowerCase().includes(q));
+    arr.sort((a,b)=>sort==='likes'?b.likes-a.likes:sort==='old'?new Date(a.date)-new Date(b.date):new Date(b.date)-new Date(a.date));
+    $('count').textContent=`${arr.length.toLocaleString('he-IL')} תגובות`;
+    $('videoCount').textContent=`מתוך ${videosSeen} סרטונים`;
+    $('results').innerHTML='';
+    const frag=document.createDocumentFragment();
+    arr.forEach(c=>{
+      const el=document.createElement('article'); el.className='comment';
+      const meta=document.createElement('div'); meta.className='meta';
+      meta.textContent=`${c.author} · ${new Date(c.date).toLocaleString('he-IL')} · ${c.likes} לייקים · ${c.replyCount} תשובות`;
+      const body=document.createElement('div'); body.className='body'; body.textContent=c.text;
+      const video=document.createElement('div'); video.className='video'; video.textContent='סרטון: '+c.videoTitle;
+      el.append(meta,body,video); frag.append(el);
+    });
+    $('results').append(frag);
+  }
+  $('search').addEventListener('input',render);
+  $('sort').addEventListener('change',render);
+  $('export').onclick=()=>{
+    const rows=[['שם מגיב','תגובה','סרטון','תאריך','לייקים','מספר תשובות'],...allComments.map(c=>[c.author,c.text,c.videoTitle,c.date,c.likes,c.replyCount])];
+    const csv='\uFEFF'+rows.map(r=>r.map(x=>'"'+String(x??'').replace(/"/g,'""')+'"').join(',')).join('\r\n');
+    const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); a.download='youtube-comments.csv'; a.click(); URL.revokeObjectURL(a.href);
+  };
+  initGoogle();
+})();
+</script>
+</body>
+</html>
+<!-- Injection By NetFree -->
+<script src="https://netfree.link/injection-script/note-in-site.js" type="text/javascript" async  id="netfree-note-site" jsondata="%7B%22noteSite%22:%22%D7%9B%D7%93%D7%99%20%D7%A9%D7%94%D7%AA%D7%9E%D7%95%D7%A0%D7%95%D7%AA%20%D7%91%D7%90%D7%AA%D7%A8%20%D7%94%D7%96%D7%94%20%D7%99%D7%97%D7%96%D7%A8%D7%95%20%D7%9E%D7%91%D7%93%D7%99%D7%A7%D7%94%2C%20%D7%99%D7%A9%20%D7%9C%D7%94%D7%92%D7%93%D7%99%D7%A8%20%5C%22%D7%90%D7%A4%D7%A9%D7%A8%20%D7%9C%D7%A1%D7%A0%D7%9F%20%D7%AA%D7%95%D7%9B%D7%9F%20%D7%A9%D7%99%D7%93%D7%95%D7%A2%20%D7%9B%D7%90%D7%99%D7%A9%D7%99%20%D7%90%D7%95%20%D7%A4%D7%A8%D7%98%D7%99%5C%22%20%D7%91%D7%94%D7%92%D7%93%D7%A8%D7%95%D7%AA%20%D7%A1%D7%99%D7%A0%D7%95%D7%9F%20%5B%5B%D7%A6%D7%90%D7%98_AI_%D7%91%D7%A0%D7%98%D7%A4%D7%A8%D7%99%7C%D7%94%D7%99%D7%9B%D7%A0%D7%A1%D7%95%20%D7%9C%D7%9B%D7%90%D7%9F%20%D7%9C%D7%94%D7%A1%D7%91%D7%A8%20%D7%9E%D7%A4%D7%95%D7%A8%D7%98%5D%5D%22%2C%22noteSiteEn%22:%22For%20images%20on%20this%20website%20to%20work%20you%20need%20to%20set%20%5C%22Filter%20content%20that%20is%20known%20as%20personal%20or%20private%5C%22%20%5B%5BAI_Chats_in_NetFree%7CClick%20here%20to%20read%20more%5D%5D%22%7D"></script><script src="//netfree.link/injection-script/go-payment.js" type="text/javascript" async ></script>
+<script src="//netfree.link/injection-script/popup-card-init.js" type="text/javascript" async ></script>
