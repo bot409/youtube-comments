@@ -165,9 +165,10 @@ button:disabled{opacity:.5;cursor:not-allowed}
               replyCount:t.snippet?.totalReplyCount||0
             });
           }
-        } catch(e) {
-          // Some videos have comments disabled or unavailable; continue with the rest.
-        }
+    } catch(e) {
+      console.error(`Error loading comments for video ${id}:`, e);
+      setStatus(`שגיאה בסרטון ${id}: ${e.message}`);
+    }        }
         if((i+1)%5===0 || i===videoIds.length-1){
           setStatus(`נטענו תגובות מ-${i+1} מתוך ${videoIds.length} סרטונים...`);
         }
