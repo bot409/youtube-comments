@@ -36,10 +36,11 @@ button:disabled{opacity:.5;cursor:not-allowed}
 
   <section class="panel">
     <h3>חיבור חד-פעמי</h3>
-    <p class="small">נדרש Google OAuth Client ID (לא API Key ולא Client Secret). מזינים אותו פעם אחת כאן; הוא נשמר רק בדפדפן הזה.</p>
+    <p class="small">הזן Google OAuth Client ID ו-YouTube API Key. הפרטים נשמרים בדפדפן בלבד.</p>
     <div class="row">
       <input id="clientId" placeholder="Google OAuth Client ID">
-      <button id="saveClient">שמירת Client ID</button>
+      <input id="apiKey" placeholder="YouTube API Key">
+      <button id="saveClient">שמירת נתונים</button>
     </div>
     <div class="row" style="margin-top:10px">
       <button id="login">התחברות לחשבון Google</button>
@@ -71,22 +72,32 @@ button:disabled{opacity:.5;cursor:not-allowed}
   const $ = id => document.getElementById(id);
   const API = 'https://www.googleapis.com/youtube/v3/';
   const SCOPE = 'https://www.googleapis.com/auth/youtube.readonly';
-  let tokenClient = null, accessToken = null, allComments = [], videosSeen = 0;
+  let tokenClient = null, accessToken = null, apiKey = '', allComments = [], videosSeen = 0;
 
   $('clientId').value = localStorage.getItem('yt_comments_client_id') || '';
+  $('apiKey').value = localStorage.getItem('yt_comments_api_key') || '';
+
   $('saveClient').onclick = () => {
     const id = $('clientId').value.trim();
+    const key = $('apiKey').value.trim();
     if (!id || !id.endsWith('.apps.googleusercontent.com')) {
       setStatus('Client ID לא תקין. הוא אמור להסתיים ב-.apps.googleusercontent.com');
       return;
     }
+    if (!key) {
+      setStatus('נא להזין API Key תקין.');
+      return;
+    }
     localStorage.setItem('yt_comments_client_id', id);
-    setStatus('נשמר בדפדפן. עכשיו אפשר להתחבר.');
+    localStorage.setItem('yt_comments_api_key', key);
+    apiKey = key;
+    setStatus('הנתונים נשמרו בדפדפן. עכשיו אפשר להתחבר.');
     initGoogle();
   };
 
   function setStatus(s){ $('status').textContent = s; }
   function initGoogle(){
+    apiKey = localStorage.getItem('yt_comments_api_key') || '';
     if (!window.google?.accounts?.oauth2) return setTimeout(initGoogle,300);
     const id = localStorage.getItem('yt_comments_client_id');
     if (!id) return;
@@ -110,48 +121,62 @@ button:disabled{opacity:.5;cursor:not-allowed}
     if (!tokenClient) initGoogle();
     setTimeout(() => tokenClient?.requestAccessToken({prompt:'consent'}),200);
   };
+
   $('logout').onclick = () => {
     if (accessToken && window.google?.accounts?.oauth2) google.accounts.oauth2.revoke(accessToken,()=>{});
     accessToken=null; allComments=[];
     $('load').disabled=true; $('logout').disabled=true; $('dataPanel').classList.add('hidden');
     setStatus('נותקת מהחשבון.');
   };
+
   $('load').onclick = loadAll;
 
-  async function api(path, params={}) {
+  async function api(path, params={}, useAuth=false) {
     const u = new URL(API+path);
     Object.entries(params).forEach(([k,v])=>u.searchParams.set(k,v));
-    const r = await fetch(u,{headers:{Authorization:'Bearer '+accessToken}});
+    const headers = {};
+    if (useAuth && accessToken) {
+      headers['Authorization'] = 'Bearer ' + accessToken;
+    } else {
+      u.searchParams.set('key', apiKey);
+    }
+    const r = await fetch(u, { headers });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error?.message || ('HTTP '+r.status));
     return data;
   }
-  async function pages(path, params, key) {
+
+  async function pages(path, params, key, useAuth=false) {
     let out=[], pageToken='';
     do {
-      const d=await api(path,{...params,...(pageToken?{pageToken}:{})});
+      const d=await api(path, {...params, ...(pageToken?{pageToken}:{})}, useAuth);
       out.push(...(d[key]||[])); pageToken=d.nextPageToken||'';
     } while(pageToken);
     return out;
   }
+
   async function loadAll(){
+    if (!apiKey) {
+      setStatus('נא להזין API Key לפני הטעינה.');
+      return;
+    }
     $('load').disabled=true; allComments=[]; videosSeen=0;
     $('dataPanel').classList.remove('hidden'); render();
     try {
       setStatus('מאתר את הערוץ...');
-      const ch=await api('channels',{part:'contentDetails',mine:'true'});
+      const ch=await api('channels', {part:'contentDetails', mine:'true'}, true);
       const channel=ch.items?.[0];
       if(!channel) throw new Error('לא נמצא ערוץ בחשבון Google הזה.');
       const uploads=channel.contentDetails.relatedPlaylists.uploads;
       setStatus('טוען את רשימת הסרטונים...');
-      const items=await pages('playlistItems',{part:'snippet,contentDetails',playlistId:uploads,maxResults:50},'items');
+      const items=await pages('playlistItems', {part:'snippet,contentDetails', playlistId:uploads, maxResults:50}, 'items', false);
       const videoIds=[...new Set(items.map(x=>x.contentDetails?.videoId).filter(Boolean))];
       videosSeen=videoIds.length;
       setStatus(`נמצאו ${videosSeen} סרטונים. טוען תגובות...`);
-      for(let i=0;i<videoIds.length;i++){
+      for(let i=0; i<videoIds.length; i++){
         const id=videoIds[i];
         try {
-          const threads=await pages('commentThreads',{part:'snippet',videoId:id,maxResults:100,order:'time'},'items');
+          const threads=await pages('commentThreads', {part:'snippet', videoId:id, maxResults:100, order:'time'}, 'items', false);
           for(const t of threads){
             const c=t.snippet?.topLevelComment?.snippet;
             if(!c) continue;
@@ -165,23 +190,22 @@ button:disabled{opacity:.5;cursor:not-allowed}
               replyCount:t.snippet?.totalReplyCount||0
             });
           }
-    } catch(e) {
-      console.error(`Error loading comments for video ${id}:`, e);
-      setStatus(`שגיאה בסרטון ${id}: ${e.message}`);
-    }        }
+        } catch(e) {
+          console.error(`Error loading video ${id}:`, e);
+        }
         if((i+1)%5===0 || i===videoIds.length-1){
           setStatus(`נטענו תגובות מ-${i+1} מתוך ${videoIds.length} סרטונים...`);
         }
       }
-      // Resolve video titles from the upload playlist metadata.
-      const titleById=new Map(items.map(x=>[x.contentDetails?.videoId,x.snippet?.title||'']));
+      const titleById=new Map(items.map(x=>[x.contentDetails?.videoId, x.snippet?.title||'']));
       allComments.forEach(c=>c.videoTitle=titleById.get(c.videoId)||c.videoId);
       setStatus(`הסתיימה הטעינה: ${allComments.length} תגובות מ-${videosSeen} סרטונים.`);
       render();
     } catch(e) {
-      setStatus('הטעינה נכשלה: '+e.message+'\nבדוק שה-YouTube Data API v3 מופעל בפרויקט Google Cloud ושחשבון Google מחובר לערוץ הנכון.');
+      setStatus('הטעינה נכשלה: '+e.message+'\nבדוק שה-YouTube Data API v3 מופעל בפרויקט ב-Google Cloud.');
     } finally { $('load').disabled=false; }
   }
+
   function render(){
     const q=$('search').value.trim().toLowerCase();
     const sort=$('sort').value;
@@ -201,6 +225,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
     });
     $('results').append(frag);
   }
+
   $('search').addEventListener('input',render);
   $('sort').addEventListener('change',render);
   $('export').onclick=()=>{
@@ -213,6 +238,3 @@ button:disabled{opacity:.5;cursor:not-allowed}
 </script>
 </body>
 </html>
-<!-- Injection By NetFree -->
-<script src="https://netfree.link/injection-script/note-in-site.js" type="text/javascript" async  id="netfree-note-site" jsondata="%7B%22noteSite%22:%22%D7%9B%D7%93%D7%99%20%D7%A9%D7%94%D7%AA%D7%9E%D7%95%D7%A0%D7%95%D7%AA%20%D7%91%D7%90%D7%AA%D7%A8%20%D7%94%D7%96%D7%94%20%D7%99%D7%97%D7%96%D7%A8%D7%95%20%D7%9E%D7%91%D7%93%D7%99%D7%A7%D7%94%2C%20%D7%99%D7%A9%20%D7%9C%D7%94%D7%92%D7%93%D7%99%D7%A8%20%5C%22%D7%90%D7%A4%D7%A9%D7%A8%20%D7%9C%D7%A1%D7%A0%D7%9F%20%D7%AA%D7%95%D7%9B%D7%9F%20%D7%A9%D7%99%D7%93%D7%95%D7%A2%20%D7%9B%D7%90%D7%99%D7%A9%D7%99%20%D7%90%D7%95%20%D7%A4%D7%A8%D7%98%D7%99%5C%22%20%D7%91%D7%94%D7%92%D7%93%D7%A8%D7%95%D7%AA%20%D7%A1%D7%99%D7%A0%D7%95%D7%9F%20%5B%5B%D7%A6%D7%90%D7%98_AI_%D7%91%D7%A0%D7%98%D7%A4%D7%A8%D7%99%7C%D7%94%D7%99%D7%9B%D7%A0%D7%A1%D7%95%20%D7%9C%D7%9B%D7%90%D7%9F%20%D7%9C%D7%94%D7%A1%D7%91%D7%A8%20%D7%9E%D7%A4%D7%95%D7%A8%D7%98%5D%5D%22%2C%22noteSiteEn%22:%22For%20images%20on%20this%20website%20to%20work%20you%20need%20to%20set%20%5C%22Filter%20content%20that%20is%20known%20as%20personal%20or%20private%5C%22%20%5B%5BAI_Chats_in_NetFree%7CClick%20here%20to%20read%20more%5D%5D%22%7D"></script><script src="//netfree.link/injection-script/go-payment.js" type="text/javascript" async ></script>
-<script src="//netfree.link/injection-script/popup-card-init.js" type="text/javascript" async ></script>
